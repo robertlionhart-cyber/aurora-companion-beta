@@ -1,6 +1,120 @@
 --- original/Aurora_Companion.py
 +++ beta/Aurora_Companion.py
-@@ -69,13 +69,13 @@
+@@ -37,6 +37,113 @@
+ from tkinter import messagebox, scrolledtext, ttk
+ 
+ 
++# ---------------------------------------------------------------------------
++# Small-screen fit (beta 0.9.6): on screens smaller than ~1280x900 (e.g. 1366x768
++# laptops) clamp every window size / minsize request to the usable work area so
++# title bars and buttons are never pushed off-screen. Bigger screens are untouched.
++# ---------------------------------------------------------------------------
++_FIT_DECOR_W = 16   # window borders
++_FIT_DECOR_H = 40   # title bar + borders
++_fit_cache = {}
++
++
++def _fit_work_area(widget=None):
++    """(left, top, width, height) of the usable desktop (monitor minus taskbar) the window is on.
++
++    Works for any resolution / DPI: Aurora is not DPI-aware, so Windows reports
++    the work area in the same logical pixels Tk uses for geometry."""
++    wa = None
++    if IS_WINDOWS:
++        try:
++            import ctypes
++            from ctypes import wintypes
++
++            class _MI(ctypes.Structure):
++                _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
++                            ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
++            u = ctypes.windll.user32
++            mon = None
++            if widget is not None:
++                try:
++                    hwnd = u.GetAncestor(int(widget.winfo_id()), 2)  # GA_ROOT
++                    if hwnd:
++                        mon = u.MonitorFromWindow(hwnd, 1)  # nearest monitor
++                except Exception:
++                    mon = None
++            if not mon:
++                mon = u.MonitorFromPoint(wintypes.POINT(0, 0), 1)  # primary
++            mi = _MI()
++            mi.cbSize = ctypes.sizeof(_MI)
++            if mon and u.GetMonitorInfoW(mon, ctypes.byref(mi)):
++                r, m = mi.rcWork, mi.rcMonitor
++                h = r.bottom - r.top
++                if h >= (m.bottom - m.top):   # auto-hide taskbar: keep it reachable
++                    h -= 48
++                wa = (int(r.left), int(r.top), int(r.right - r.left), int(h))
++        except Exception:
++            wa = None
++    if wa is None and widget is not None:
++        try:
++            wa = (0, 0, int(widget.winfo_screenwidth()), int(widget.winfo_screenheight()) - 48)
++        except Exception:
++            wa = None
++    return wa
++
++
++def _fit_small_screen(widget=None):
++    wa = _fit_work_area(widget)
++    return bool(wa) and (wa[2] < 1280 or wa[3] < 860), wa
++
++
++_orig_wm_geometry = tk.Wm.wm_geometry
++_orig_wm_minsize = tk.Wm.wm_minsize
++
++
++def _fit_wm_geometry(self, newGeometry=None):
++    if newGeometry:
++        try:
++            wa = _fit_work_area(self)
++            m = re.match(r"^(\d+)x(\d+)([+-]-?\d+[+-]-?\d+)?$", str(newGeometry).strip()) if wa else None
++            if m:
++                w, h = int(m.group(1)), int(m.group(2))
++                max_w, max_h = wa[2] - _FIT_DECOR_W, wa[3] - _FIT_DECOR_H
++                if w > max_w or h > max_h or m.group(3):
++                    w, h = min(w, max_w), min(h, max_h)
++                    pos = m.group(3)
++                    if pos:
++                        pm = re.match(r"^([+-])(-?\d+)([+-])(-?\d+)$", pos)
++                        x = int(pm.group(2)) * (1 if pm.group(1) == "+" else -1)
++                        y = int(pm.group(4)) * (1 if pm.group(3) == "+" else -1)
++                        if pm.group(1) == "+" and pm.group(3) == "+":
++                            x = max(wa[0], min(x, wa[0] + wa[2] - w - _FIT_DECOR_W))
++                            y = max(wa[1], min(y, wa[1] + wa[3] - h - _FIT_DECOR_H))
++                            pos = f"+{x}+{y}"
++                    else:
++                        # centre it in the work area so nothing hangs off the bottom
++                        pos = f"+{wa[0] + max(0, (wa[2] - w - _FIT_DECOR_W) // 2)}" \
++                              f"+{wa[1] + max(0, (wa[3] - h - _FIT_DECOR_H) // 2)}"
++                    newGeometry = f"{w}x{h}{pos}"
++        except Exception:
++            pass
++    return _orig_wm_geometry(self, newGeometry)
++
++
++def _fit_wm_minsize(self, width=None, height=None):
++    if width is not None and height is not None:
++        try:
++            wa = _fit_work_area(self)
++            if wa:
++                width = min(int(width), wa[2] - _FIT_DECOR_W)
++                height = min(int(height), wa[3] - _FIT_DECOR_H)
++        except Exception:
++            pass
++    return _orig_wm_minsize(self, width, height)
++
++
++tk.Wm.wm_geometry = tk.Wm.geometry = _fit_wm_geometry
++tk.Wm.wm_minsize = tk.Wm.minsize = _fit_wm_minsize
++
++
+ def _check_dependencies():
+     """
+     Verify required third-party packages before the app starts.
+@@ -69,13 +176,13 @@
      for pip_name, mod_name, err in missing:
          lines.append(f"  • {pip_name}  (import {mod_name})")
      if IS_WINDOWS:
@@ -18,7 +132,7 @@
      lines.extend([
          "",
          "Easiest fix:",
-@@ -116,7 +116,7 @@
+@@ -116,7 +223,7 @@
  import cv2
  
  # ====================== CONFIG ======================
@@ -27,7 +141,7 @@
  OLLAMA_MODEL = "hf.co/HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced:Q4_K_M"  # default local model (GPU / Auto)
  OLLAMA_NUM_CTX = 8192                     # Auto/GPU context cap for ~12 GB VRAM
  OLLAMA_MODEL_CPU = "dolphin3:latest"         # Force-CPU fallback model
-@@ -263,8 +263,8 @@
+@@ -263,8 +370,8 @@
  # Back-compat name used throughout the app (piper binary, voices, avatars, …)
  PIPER_DIR = APP_ROOT
  VOICES_DIR = PIPER_DIR / "voices"         # all .onnx voice models live here
@@ -38,7 +152,7 @@
  
  
  def get_piper_binary() -> Path:
-@@ -717,6 +717,61 @@
+@@ -717,6 +824,61 @@
  # --- END ollama config helpers (round 3) ---
  
  
@@ -100,7 +214,7 @@
  
  def safe_load_json(path: Path, default=None, repair_name: str = "data"):
      """
-@@ -856,7 +911,7 @@
+@@ -856,7 +1018,7 @@
          except Exception as e:
              print(f"[Knowledge] Could not save index: {e}")
  
@@ -109,7 +223,7 @@
          """Return a single string of the most relevant passages, or empty string."""
          if not self.ready or not question.strip():
              return ""
-@@ -878,7 +933,10 @@
+@@ -878,7 +1040,10 @@
                  df[t] += 1
          N = len(self.chunks)
  
@@ -120,7 +234,23 @@
              tf = Counter(c["tokens"])
              dl = len(c["tokens"]) or 1
              score = 0.0
-@@ -964,7 +1022,7 @@
+@@ -911,6 +1076,15 @@
+ class AuroraApp:
+     def __init__(self):
+         self.root = tk.Tk()
++        try:
++            # Auto-size text for short screens (e.g. 1366x768, or 125-150% scaling on small
++            # laptops) so pages and dialogs fit. Normal/large screens are unchanged.
++            _wa = _fit_work_area(self.root)
++            if _wa and _wa[3] < 740:
++                _f = max(0.8, _wa[3] / 760.0)
++                self.root.tk.call("tk", "scaling", float(self.root.tk.call("tk", "scaling")) * _f)
++        except Exception:
++            pass
+         self.root.title("Aurora Companion")
+         self.root.configure(bg="#000000")
+         self._apply_startup_window_size()
+@@ -964,7 +1138,7 @@
              "location": "",          # city for weather/news (online mode)
              "online_mode": False,    # False = offline only (default for privacy)
              "reply_length": "normal",  # short | normal | long
@@ -129,7 +259,88 @@
              "llm_provider": "ollama",  # ollama (local) | grok (xAI cloud API)
              "tts_provider": "piper",   # piper (local) | grok (xAI TTS)
              "think_harder": False,    # Grok-only: deeper replies for harder questions
-@@ -3546,21 +3604,19 @@
+@@ -1699,16 +1873,61 @@
+             bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
+ 
+         panel_bg = "#101018" if photo else "#0d0d12"
+-        # Soft floating panel — no hard chrome border
+-        content = tk.Frame(
+-            shell, bg=panel_bg, padx=padx, pady=pady,
+-            highlightthickness=0, bd=0, borderwidth=0,
+-        )
+-        content.place(relx=0.5, rely=0.5, anchor="center")
++        # Scrollable, centred page: fits any screen size / DPI and the Continue/Next
++        # buttons can always be reached. Short screens also get tighter padding.
++        if _fit_small_screen(self.root)[0]:
++            pady = min(pady, 12)
++        content = self._scrollable_wizard_panel(shell, photo, panel_bg, padx, pady)
+         self._wizard_panel_bg = panel_bg
+ 
+         if step_id:
+             self.add_wizard_progress(content, step_id, panel_bg)
++        return content
++
++    def _scrollable_wizard_panel(self, shell, photo, panel_bg, padx, pady):
++        """Centered wizard panel inside a canvas that scrolls when the page is taller than the window."""
++        for w in shell.place_slaves():
++            w.place_forget()
++        cv = tk.Canvas(shell, bg="#050508", highlightthickness=0, bd=0, yscrollincrement=24)
++        cv.pack(side="left", fill="both", expand=True)
++        sb = tk.Scrollbar(shell, orient="vertical", command=cv.yview)
++        cv.configure(yscrollcommand=sb.set)
++        if photo:
++            cv.create_image(0, 0, anchor="nw", image=photo)
++            cv._bg_photo = photo
++        content = tk.Frame(cv, bg=panel_bg, padx=padx, pady=pady, highlightthickness=0, bd=0)
++        win_id = cv.create_window(0, 0, window=content, anchor="n")
++
++        def relayout(_e=None):
++            try:
++                cw, ch = cv.winfo_width(), cv.winfo_height()
++                rh = content.winfo_reqheight()
++                y = max(0, (ch - rh) // 2)
++                cv.coords(win_id, cw // 2, y)
++                cv.configure(scrollregion=(0, 0, cw, max(ch, rh + y)))
++                if rh > ch:
++                    if not sb.winfo_ismapped():
++                        sb.pack(side="right", fill="y", before=cv)
++                elif sb.winfo_ismapped():
++                    sb.pack_forget()
++                    cv.yview_moveto(0)
++            except tk.TclError:
++                pass
++
++        content.bind("<Configure>", relayout, add="+")
++        cv.bind("<Configure>", relayout, add="+")
++        self._wizard_canvas = cv
++        if not getattr(self, "_wizard_wheel_bound", False):
++            self._wizard_wheel_bound = True
++
++            def _wheel(e):
++                c = getattr(self, "_wizard_canvas", None)
++                try:
++                    if c is not None and c.winfo_exists() and str(e.widget).startswith(str(c)):
++                        c.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
++                except Exception:
++                    pass
++            self.root.bind_all("<MouseWheel>", _wheel, add="+")
+         return content
+ 
+     def add_wizard_progress(self, parent, step_id: str, bg: str = "#000000"):
+@@ -3373,6 +3592,12 @@
+     # ==================== PRIVACY DISCLAIMER ====================
+     def load_logo_image(self, max_width=420, max_height=160):
+         """Load aurora_logo.png if present. Returns ImageTk.PhotoImage or None."""
++        try:
++            if _fit_small_screen(self.root)[0]:
++                # Short screens (e.g. 1366x768): smaller logo so wizard pages fit without scrolling.
++                max_width, max_height = int(max_width * 0.6), int(max_height * 0.6)
++        except Exception:
++            pass
+         paths = [
+             PIPER_DIR / "aurora_logo.png",
+             Path(__file__).resolve().parent / "aurora_logo.png",
+@@ -3546,21 +3771,19 @@
                  "Adult mode is not available for under-18 profiles."
              )
              return
@@ -160,7 +371,7 @@
              ok = messagebox.askyesno(
                  "Enable Adult mode?",
                  "Adult / NSFW mode allows explicit and seductive conversation.\n\n"
-@@ -3623,8 +3679,100 @@
+@@ -3623,8 +3846,100 @@
                  log("WARN", f"Bad pack.json in {folder.name}: {e}")
          return packs
  
@@ -262,7 +473,7 @@
          # Environment override for development
          if str(os.environ.get("AURORA_DEV_UNLOCK_ALL", "")).strip() in ("1", "true", "yes"):
              return True
-@@ -3808,7 +3956,8 @@
+@@ -3808,7 +4123,8 @@
          unlocked = self.adult_content_unlocked()
          tk.Label(
              status_frame,
@@ -272,7 +483,7 @@
              font=(self.font_family, 12, "bold"),
              fg=("#7dcea0" if unlocked else "#e0c070"),
              bg="#14141c",
-@@ -3919,7 +4068,9 @@
+@@ -3919,7 +4235,9 @@
          ).pack(side="left")
  
          dev_row = tk.Frame(win, bg="#0d0d12")
@@ -283,7 +494,7 @@
          tk.Label(
              dev_row, text="Developer testing",
              font=(self.font_family, 10, "bold"), fg="#666677", bg="#0d0d12"
-@@ -5587,6 +5738,18 @@
+@@ -5587,19 +5905,24 @@
                  return
              age = age_var.get()
              password = pw_var.get()
@@ -302,21 +513,20 @@
              if age == "over18" and password.strip() == "":
                  # Allow empty password, but confirm
                  if not messagebox.askyesno(
-@@ -5595,13 +5758,6 @@
+                     "No password?",
+                     "Continue without a password for this adult profile?\n\n"
                      "Anyone on this PC can open it."
-                 ):
-                     return
+-                ):
+-                    return
 -            if age == "over18" and password.strip():
 -                # Light adult confirmation once at account creation
 -                if not messagebox.askyesno(
 -                    "Age confirmation",
 -                    "Confirm you are 18 or older and will use Adult features responsibly."
--                ):
--                    return
+                 ):
+                     return
              user = self.create_user_account(name, age, password.strip())
-             self.play_ui_sound("select")
-             self.login_user(user)
-@@ -5656,6 +5812,8 @@
+@@ -5656,6 +5979,8 @@
                   font=(self.font_family, 11), fg="#666666", bg=bg).pack(pady=(30, 10))
  
      def select_age(self, age_group):
@@ -325,7 +535,7 @@
          self.user_profile["age_group"] = age_group
          if age_group == "over18":
              self.show_legal_agreement()
-@@ -5691,16 +5849,26 @@
+@@ -5691,16 +6016,26 @@
          btn_frame.pack()
          tk.Button(btn_frame, text="Go Back", font=(self.font_family, 12),
                    bg="#22222a", fg="#ffffff", relief="flat", width=15, cursor="hand2",
@@ -334,12 +544,12 @@
          tk.Button(btn_frame, text="Continue", font=(self.font_family, 12, "bold"),
                    bg="#22222a", fg="#ffffff", activebackground="#c45c8a", relief="flat", width=15, cursor="hand2",
                    command=self.check_agreement).pack(side="left", padx=15)
- 
++
 +    def _legal_go_back(self):
 +        # Beta: leaving the 18+ agreement without confirming = not confirmed adult
 +        self.user_profile["age_group"] = "under18"
 +        self.show_title_screen()
-+
+ 
      def check_agreement(self):
          if self.agree_var.get():
              self.show_companion_selection()
@@ -354,7 +564,7 @@
  
      # ==================== COMPANION SELECTION ====================
      def show_companion_selection(self):
-@@ -5878,7 +6046,7 @@
+@@ -5878,7 +6213,7 @@
              "location": "",
              "online_mode": False,
              "reply_length": "normal",
@@ -363,7 +573,7 @@
              "llm_provider": "ollama",
              "tts_provider": "piper",
              "think_harder": False,
-@@ -6747,10 +6915,11 @@
+@@ -6747,10 +7082,11 @@
          # Auto-detect voices from the voices/ folder (and piper root as fallback)
          self.available_voices = self.scan_available_voices()
          default_label = next(iter(self.available_voices.keys()))
@@ -379,7 +589,7 @@
                  break
          self.voice_var = tk.StringVar(value=default_label)
          ttk.Combobox(container, textvariable=self.voice_var,
-@@ -6768,7 +6937,7 @@
+@@ -6768,7 +7104,7 @@
          """Return (model_path, config_path) for a voice id like en_US-amy-medium.
          Looks in voices/ first, then the piper root as fallback."""
          if not voice_id:
@@ -388,7 +598,7 @@
  
          candidates = [
              (VOICES_DIR / f"{voice_id}.onnx", VOICES_DIR / f"{voice_id}.onnx.json"),
-@@ -6802,7 +6971,7 @@
+@@ -6802,7 +7138,7 @@
                  if voice_id not in found:
                      found[label] = voice_id
          if not found:
@@ -397,7 +607,7 @@
          return found
  
      def preview_voice(self):
-@@ -8577,7 +8746,8 @@
+@@ -8577,7 +8913,8 @@
          )
  
          # Adult/NSFW mode is opt-in. under18 is always PG. Memory is unchanged either way.
@@ -407,7 +617,7 @@
              if companion_kind == "pet":
                  look = f"{pet_breed} {pet_type}".strip() or "pet"
                  notes = app.get("notes") or ""
-@@ -8600,9 +8770,9 @@
+@@ -8600,9 +8937,9 @@
                      f"Keep conversations appropriate for everyday settings (home, work, public). "
                      f"No sexual content, no explicit body focus, no seduction, and do not try to get "
                      f"{user} into bed or escalate intimacy. "
@@ -420,7 +630,7 @@
                      f"{app.get('eyes')} eyes, {app.get('height')}, {app.get('weight')}. "
                      f"Their interests include: {hobbies}. "
                      f"Be helpful, fun, and genuinely present."
-@@ -8637,6 +8807,16 @@
+@@ -8637,6 +8974,16 @@
              single = (p.get("relationship_style") or "").strip().lower()
              styles = [single] if single else []
          styles = [str(s).strip().lower() for s in styles if s]
@@ -437,7 +647,7 @@
          style_blurb_map = {
              "friend": (
                  f"Relationship: close friend. Be warm, loyal, and easy to talk to. "
-@@ -8816,9 +8996,9 @@
+@@ -8816,9 +9163,9 @@
          saved profile preference — switching back to Auto restores the profile size.
          """
          global _WHISPER_CACHE
@@ -449,7 +659,7 @@
          # Low-power override while Force CPU is on (profile left untouched)
          if self.force_ollama_cpu():
              size = WHISPER_SIZE_CPU
-@@ -9841,7 +10021,10 @@
+@@ -9841,7 +10188,10 @@
          self.messages = self.load_memory()
          # Build / load the book knowledge index (runs in background-friendly way)
          try:
@@ -461,7 +671,28 @@
          except Exception as e:
              print(f"[Knowledge] Index build error: {e}")
          # Live info (only fetches network data if online_mode is on)
-@@ -11243,7 +11426,10 @@
+@@ -10407,8 +10757,9 @@
+                 if ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work), 0):
+                     work_w = int(work.right - work.left)
+                     work_h = int(work.bottom - work.top)
+-                    height = max(780, work_h - margin)
+-                    width = int(max(480, min(560, height * 0.48)))
++                    # client height: leave room for the title bar so nothing goes under the taskbar
++                    height = max(420, work_h - _FIT_DECOR_H - margin)
++                    width = int(max(min(480, work_w - 40), min(560, height * 0.48)))
+                     # Right side of the work area
+                     x = int(work.right - width - margin)
+                     # Vertically centered
+@@ -10418,7 +10769,7 @@
+             try:
+                 screen_h = int(self.root.winfo_screenheight())
+                 screen_w = int(self.root.winfo_screenwidth())
+-                height = max(780, screen_h - 56)
++                height = max(420, screen_h - 56 - _FIT_DECOR_H)
+                 width = int(max(480, min(560, height * 0.48)))
+                 x = max(0, screen_w - width - 8)
+                 y = max(0, (screen_h - height) // 2)
+@@ -11243,7 +11594,10 @@
      def retrieve_knowledge(self, question: str) -> str:
          """Pull relevant passages from the book library for this question."""
          try:
@@ -473,7 +704,31 @@
              if passages:
                  print(f"[Knowledge] Retrieved {passages.count(chr(10)+chr(10))+1} passages for: {question[:60]}...")
              return passages
-@@ -12204,7 +12390,7 @@
+@@ -11924,8 +12278,21 @@
+ 
+             if ret:
+                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+-                max_w = max(self.avatar_label.winfo_width(), 480)
+-                max_h = max(self.avatar_label.winfo_height(), 900)
++                # Size floors shrink on short screens so the video never pushes the
++                # bottom bar (Send / mic) off the window. Large screens: unchanged (480x900).
++                floor_w, floor_h = getattr(self, "_avatar_floor", (0, 0))
++                if not floor_h:
++                    floor_w, floor_h = 480, 900
++                    try:
++                        _wa = _fit_work_area(self.root)
++                        if _wa and _wa[3] < 1000:
++                            floor_h = max(300, _wa[3] - 300)
++                            floor_w = min(480, max(300, int(floor_h * 0.6)))
++                    except Exception:
++                        pass
++                    self._avatar_floor = (floor_w, floor_h)
++                max_w = max(self.avatar_label.winfo_width(), floor_w)
++                max_h = max(self.avatar_label.winfo_height(), floor_h)
+                 h, w = frame.shape[:2]
+ 
+                 # On maximize: fit full body (contain) so nothing is cropped to midsection.
+@@ -12204,7 +12571,7 @@
              self.setup_system_tray()
          state = "ON" if self.tray_enabled and self._tray_available else "OFF"
          if self.tray_enabled and not self._tray_available:
@@ -482,7 +737,7 @@
              pip = "py -m pip" if IS_WINDOWS else "python3 -m pip"
              messagebox.showinfo(
                  "Minimize to tray",
-@@ -12635,13 +12821,14 @@
+@@ -12635,13 +13002,14 @@
              self._settings_row(comp_body, "Clear / restart chat", self.clear_history)
              if self.is_grok_active():
                  self._settings_row(comp_body, "Summarize chat into memory (Grok)…", self.manual_chat_summary)
@@ -499,7 +754,7 @@
                  else:
                      nsfw_label = "Adult mode: OFF  (PG — safe in public)"
                  self._settings_row(comp_body, nsfw_label, self.toggle_nsfw_mode)
-@@ -14714,7 +14901,7 @@
+@@ -14714,7 +15082,7 @@
          text_w.pack(fill="both", expand=True)
          lines = list(results.get("details") or [])
          lines.append("")
@@ -508,7 +763,7 @@
          piper_name = "piper.exe" if IS_WINDOWS else "piper"
          lines.append("Quick fixes:")
          lines.append(f"  1. Python packages: run {install_name} once")
-@@ -18010,7 +18197,7 @@
+@@ -18010,7 +18378,7 @@
              messagebox.showwarning("Dual Mode", "Pick two different companions.", parent=self._dual_win)
              return
          self._dual_max_turns = self._dual_parse_max_turns()
@@ -517,7 +772,7 @@
          continuing = self._dual_has_active_chat()
          if continuing:
              # Keep LLM histories + chat log; pick up from the last speaker
-@@ -18676,7 +18863,7 @@
+@@ -18676,7 +19044,7 @@
              else:
                  self._dual_first = random.choice(["a", "b"])
              self._dual_max_turns = self._dual_parse_max_turns()

@@ -37,6 +37,113 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 
+# ---------------------------------------------------------------------------
+# Small-screen fit (beta 0.9.6): on screens smaller than ~1280x900 (e.g. 1366x768
+# laptops) clamp every window size / minsize request to the usable work area so
+# title bars and buttons are never pushed off-screen. Bigger screens are untouched.
+# ---------------------------------------------------------------------------
+_FIT_DECOR_W = 16   # window borders
+_FIT_DECOR_H = 40   # title bar + borders
+_fit_cache = {}
+
+
+def _fit_work_area(widget=None):
+    """(left, top, width, height) of the usable desktop (monitor minus taskbar) the window is on.
+
+    Works for any resolution / DPI: Aurora is not DPI-aware, so Windows reports
+    the work area in the same logical pixels Tk uses for geometry."""
+    wa = None
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class _MI(ctypes.Structure):
+                _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                            ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+            u = ctypes.windll.user32
+            mon = None
+            if widget is not None:
+                try:
+                    hwnd = u.GetAncestor(int(widget.winfo_id()), 2)  # GA_ROOT
+                    if hwnd:
+                        mon = u.MonitorFromWindow(hwnd, 1)  # nearest monitor
+                except Exception:
+                    mon = None
+            if not mon:
+                mon = u.MonitorFromPoint(wintypes.POINT(0, 0), 1)  # primary
+            mi = _MI()
+            mi.cbSize = ctypes.sizeof(_MI)
+            if mon and u.GetMonitorInfoW(mon, ctypes.byref(mi)):
+                r, m = mi.rcWork, mi.rcMonitor
+                h = r.bottom - r.top
+                if h >= (m.bottom - m.top):   # auto-hide taskbar: keep it reachable
+                    h -= 48
+                wa = (int(r.left), int(r.top), int(r.right - r.left), int(h))
+        except Exception:
+            wa = None
+    if wa is None and widget is not None:
+        try:
+            wa = (0, 0, int(widget.winfo_screenwidth()), int(widget.winfo_screenheight()) - 48)
+        except Exception:
+            wa = None
+    return wa
+
+
+def _fit_small_screen(widget=None):
+    wa = _fit_work_area(widget)
+    return bool(wa) and (wa[2] < 1280 or wa[3] < 860), wa
+
+
+_orig_wm_geometry = tk.Wm.wm_geometry
+_orig_wm_minsize = tk.Wm.wm_minsize
+
+
+def _fit_wm_geometry(self, newGeometry=None):
+    if newGeometry:
+        try:
+            wa = _fit_work_area(self)
+            m = re.match(r"^(\d+)x(\d+)([+-]-?\d+[+-]-?\d+)?$", str(newGeometry).strip()) if wa else None
+            if m:
+                w, h = int(m.group(1)), int(m.group(2))
+                max_w, max_h = wa[2] - _FIT_DECOR_W, wa[3] - _FIT_DECOR_H
+                if w > max_w or h > max_h or m.group(3):
+                    w, h = min(w, max_w), min(h, max_h)
+                    pos = m.group(3)
+                    if pos:
+                        pm = re.match(r"^([+-])(-?\d+)([+-])(-?\d+)$", pos)
+                        x = int(pm.group(2)) * (1 if pm.group(1) == "+" else -1)
+                        y = int(pm.group(4)) * (1 if pm.group(3) == "+" else -1)
+                        if pm.group(1) == "+" and pm.group(3) == "+":
+                            x = max(wa[0], min(x, wa[0] + wa[2] - w - _FIT_DECOR_W))
+                            y = max(wa[1], min(y, wa[1] + wa[3] - h - _FIT_DECOR_H))
+                            pos = f"+{x}+{y}"
+                    else:
+                        # centre it in the work area so nothing hangs off the bottom
+                        pos = f"+{wa[0] + max(0, (wa[2] - w - _FIT_DECOR_W) // 2)}" \
+                              f"+{wa[1] + max(0, (wa[3] - h - _FIT_DECOR_H) // 2)}"
+                    newGeometry = f"{w}x{h}{pos}"
+        except Exception:
+            pass
+    return _orig_wm_geometry(self, newGeometry)
+
+
+def _fit_wm_minsize(self, width=None, height=None):
+    if width is not None and height is not None:
+        try:
+            wa = _fit_work_area(self)
+            if wa:
+                width = min(int(width), wa[2] - _FIT_DECOR_W)
+                height = min(int(height), wa[3] - _FIT_DECOR_H)
+        except Exception:
+            pass
+    return _orig_wm_minsize(self, width, height)
+
+
+tk.Wm.wm_geometry = tk.Wm.geometry = _fit_wm_geometry
+tk.Wm.wm_minsize = tk.Wm.minsize = _fit_wm_minsize
+
+
 def _check_dependencies():
     """
     Verify required third-party packages before the app starts.
@@ -969,6 +1076,15 @@ class KnowledgeBase:
 class AuroraApp:
     def __init__(self):
         self.root = tk.Tk()
+        try:
+            # Auto-size text for short screens (e.g. 1366x768, or 125-150% scaling on small
+            # laptops) so pages and dialogs fit. Normal/large screens are unchanged.
+            _wa = _fit_work_area(self.root)
+            if _wa and _wa[3] < 740:
+                _f = max(0.8, _wa[3] / 760.0)
+                self.root.tk.call("tk", "scaling", float(self.root.tk.call("tk", "scaling")) * _f)
+        except Exception:
+            pass
         self.root.title("Aurora Companion")
         self.root.configure(bg="#000000")
         self._apply_startup_window_size()
@@ -1757,16 +1873,61 @@ class AuroraApp:
             bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
 
         panel_bg = "#101018" if photo else "#0d0d12"
-        # Soft floating panel — no hard chrome border
-        content = tk.Frame(
-            shell, bg=panel_bg, padx=padx, pady=pady,
-            highlightthickness=0, bd=0, borderwidth=0,
-        )
-        content.place(relx=0.5, rely=0.5, anchor="center")
+        # Scrollable, centred page: fits any screen size / DPI and the Continue/Next
+        # buttons can always be reached. Short screens also get tighter padding.
+        if _fit_small_screen(self.root)[0]:
+            pady = min(pady, 12)
+        content = self._scrollable_wizard_panel(shell, photo, panel_bg, padx, pady)
         self._wizard_panel_bg = panel_bg
 
         if step_id:
             self.add_wizard_progress(content, step_id, panel_bg)
+        return content
+
+    def _scrollable_wizard_panel(self, shell, photo, panel_bg, padx, pady):
+        """Centered wizard panel inside a canvas that scrolls when the page is taller than the window."""
+        for w in shell.place_slaves():
+            w.place_forget()
+        cv = tk.Canvas(shell, bg="#050508", highlightthickness=0, bd=0, yscrollincrement=24)
+        cv.pack(side="left", fill="both", expand=True)
+        sb = tk.Scrollbar(shell, orient="vertical", command=cv.yview)
+        cv.configure(yscrollcommand=sb.set)
+        if photo:
+            cv.create_image(0, 0, anchor="nw", image=photo)
+            cv._bg_photo = photo
+        content = tk.Frame(cv, bg=panel_bg, padx=padx, pady=pady, highlightthickness=0, bd=0)
+        win_id = cv.create_window(0, 0, window=content, anchor="n")
+
+        def relayout(_e=None):
+            try:
+                cw, ch = cv.winfo_width(), cv.winfo_height()
+                rh = content.winfo_reqheight()
+                y = max(0, (ch - rh) // 2)
+                cv.coords(win_id, cw // 2, y)
+                cv.configure(scrollregion=(0, 0, cw, max(ch, rh + y)))
+                if rh > ch:
+                    if not sb.winfo_ismapped():
+                        sb.pack(side="right", fill="y", before=cv)
+                elif sb.winfo_ismapped():
+                    sb.pack_forget()
+                    cv.yview_moveto(0)
+            except tk.TclError:
+                pass
+
+        content.bind("<Configure>", relayout, add="+")
+        cv.bind("<Configure>", relayout, add="+")
+        self._wizard_canvas = cv
+        if not getattr(self, "_wizard_wheel_bound", False):
+            self._wizard_wheel_bound = True
+
+            def _wheel(e):
+                c = getattr(self, "_wizard_canvas", None)
+                try:
+                    if c is not None and c.winfo_exists() and str(e.widget).startswith(str(c)):
+                        c.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+                except Exception:
+                    pass
+            self.root.bind_all("<MouseWheel>", _wheel, add="+")
         return content
 
     def add_wizard_progress(self, parent, step_id: str, bg: str = "#000000"):
@@ -3431,6 +3592,12 @@ class AuroraApp:
     # ==================== PRIVACY DISCLAIMER ====================
     def load_logo_image(self, max_width=420, max_height=160):
         """Load aurora_logo.png if present. Returns ImageTk.PhotoImage or None."""
+        try:
+            if _fit_small_screen(self.root)[0]:
+                # Short screens (e.g. 1366x768): smaller logo so wizard pages fit without scrolling.
+                max_width, max_height = int(max_width * 0.6), int(max_height * 0.6)
+        except Exception:
+            pass
         paths = [
             PIPER_DIR / "aurora_logo.png",
             Path(__file__).resolve().parent / "aurora_logo.png",
@@ -10590,8 +10757,9 @@ class AuroraApp:
                 if ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work), 0):
                     work_w = int(work.right - work.left)
                     work_h = int(work.bottom - work.top)
-                    height = max(780, work_h - margin)
-                    width = int(max(480, min(560, height * 0.48)))
+                    # client height: leave room for the title bar so nothing goes under the taskbar
+                    height = max(420, work_h - _FIT_DECOR_H - margin)
+                    width = int(max(min(480, work_w - 40), min(560, height * 0.48)))
                     # Right side of the work area
                     x = int(work.right - width - margin)
                     # Vertically centered
@@ -10601,7 +10769,7 @@ class AuroraApp:
             try:
                 screen_h = int(self.root.winfo_screenheight())
                 screen_w = int(self.root.winfo_screenwidth())
-                height = max(780, screen_h - 56)
+                height = max(420, screen_h - 56 - _FIT_DECOR_H)
                 width = int(max(480, min(560, height * 0.48)))
                 x = max(0, screen_w - width - 8)
                 y = max(0, (screen_h - height) // 2)
@@ -12110,8 +12278,21 @@ class AuroraApp:
 
             if ret:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                max_w = max(self.avatar_label.winfo_width(), 480)
-                max_h = max(self.avatar_label.winfo_height(), 900)
+                # Size floors shrink on short screens so the video never pushes the
+                # bottom bar (Send / mic) off the window. Large screens: unchanged (480x900).
+                floor_w, floor_h = getattr(self, "_avatar_floor", (0, 0))
+                if not floor_h:
+                    floor_w, floor_h = 480, 900
+                    try:
+                        _wa = _fit_work_area(self.root)
+                        if _wa and _wa[3] < 1000:
+                            floor_h = max(300, _wa[3] - 300)
+                            floor_w = min(480, max(300, int(floor_h * 0.6)))
+                    except Exception:
+                        pass
+                    self._avatar_floor = (floor_w, floor_h)
+                max_w = max(self.avatar_label.winfo_width(), floor_w)
+                max_h = max(self.avatar_label.winfo_height(), floor_h)
                 h, w = frame.shape[:2]
 
                 # On maximize: fit full body (contain) so nothing is cropped to midsection.
