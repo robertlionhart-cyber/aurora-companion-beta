@@ -122,12 +122,42 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+_PREFER_CURL = False  # set after the first certificate error so later downloads skip urllib
+
+
+def _curl_exe():
+    if not IS_WINDOWS:
+        return None
+    c = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "curl.exe"
+    return str(c) if c.exists() else shutil.which("curl.exe")
+
+
+def _curl_download(url: str, part: Path, log, progress=None):
+    cmd = [_curl_exe(), "-L", "--fail", "--retry", "3", "--retry-delay", "3", "-sS",
+           "-A", UA["User-Agent"], "-o", str(part), url]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         creationflags=NO_WINDOW)
+    while p.poll() is None:
+        if progress and part.exists():
+            progress(part.stat().st_size, 0)
+        time.sleep(0.5)
+    out = (p.stdout.read() or "").strip() if p.stdout else ""
+    if p.returncode != 0:
+        raise SetupError(f"Could not download {url}\ncurl: {out or p.returncode}")
+    log("  downloaded with curl.exe")
+
+
 def download(url: str, dest: Path, log, progress=None, expect_sha=None, min_bytes=1000):
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
     log(f"Downloading {url}")
     last = 0.0
+    global _PREFER_CURL
+    use_curl = _PREFER_CURL
     for attempt in range(1, 4):
+        if use_curl:
+            _curl_download(url, part, log, progress)
+            break
         try:
             with urlopen(Request(url, headers=UA), timeout=60) as r, open(part, "wb") as f:
                 total = int(r.headers.get("Content-Length") or 0)
@@ -143,6 +173,13 @@ def download(url: str, dest: Path, log, progress=None, expect_sha=None, min_byte
                         progress(done, total)
             break
         except Exception as e:
+            if IS_WINDOWS and "CERTIFICATE_VERIFY_FAILED" in str(e) and _curl_exe():
+                # Fresh Windows installs often lack some root certificates until Windows fetches
+                # them on demand. Python can't trigger that, but Windows' own curl.exe can.
+                log("  using Windows' built-in downloader (curl.exe) for secure downloads")
+                _PREFER_CURL = use_curl = True
+                _curl_download(url, part, log, progress)
+                break
             log(f"  download attempt {attempt} failed: {e}")
             if attempt == 3:
                 raise SetupError(f"Could not download {url}\n{e}")
@@ -389,7 +426,10 @@ class Installer:
             with tempfile.TemporaryDirectory() as td:
                 inst = download(OLLAMA_WIN_URL, Path(td) / "OllamaSetup.exe", self.log, self.progress,
                                 min_bytes=5_000_000)
-                self.status("Installing Ollama for your user (no admin needed)...")
+                self.status("Installing Ollama (no admin needed). If an Ollama window or notification "
+                            "pops up, you can close it - setup handles everything.")
+                self.log("Note: Ollama may show its own welcome popup (\"run ollama in a terminal\"). "
+                         "You can close it; you don't need to type anything.")
                 run([inst, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"], self.log, check=False)
             exe = hwcheck.ollama_exe()
             if not exe:
@@ -418,7 +458,8 @@ class Installer:
         flags = (0x00000008 | NO_WINDOW) if IS_WINDOWS else 0  # DETACHED_PROCESS
         subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=flags, start_new_session=not IS_WINDOWS)
-        for _ in range(60):
+        self.status("Starting Ollama (can take a couple of minutes on slower PCs)...")
+        for _ in range(180):
             if ollama_up():
                 self.log("Ollama is running.")
                 return
@@ -461,7 +502,8 @@ class Installer:
         run([VENV_PY, "-c",
              "from faster_whisper import WhisperModel; "
              f"WhisperModel('{size}', device='cpu', compute_type='int8'); print('whisper {size} ready')"],
-            self.log)
+            self.log, env=dict(os.environ, HF_HUB_DISABLE_SYMLINKS_WARNING="1", PYTHONWARNINGS="ignore",
+                               HF_HUB_DISABLE_IMPLICIT_TOKEN="1"))
 
     # -- 7. config -----------------------------------------------------------
     def step_config(self):
@@ -810,6 +852,8 @@ def run_gui():
                         if t:
                             dl.configure(maximum=t, value=d)
                             sub_lbl.configure(text=f"{d / 1e6:,.0f} of {t / 1e6:,.0f} MB")
+                        else:
+                            sub_lbl.configure(text=f"{d / 1e6:,.0f} MB downloaded")
                     elif kind == "fail":
                         i, err = val
                         step_lbl.configure(text=f"Problem in step {i + 1}: {steps[i][0]}", fg="#ff8080")

@@ -101,6 +101,7 @@ you can switch it with the "Book library" box in Setup.
 
 ## If something goes wrong
 
+- **Ollama popup saying to run "ollama" in a terminal:** you can just close it. Setup and Aurora start Ollama for you.
 - **No voice:** run `Setup.bat` again (it repairs missing pieces).
 - **"Ollama not running":** restart the PC, or start Ollama from the Start menu.
 - **Very slow replies:** run `Setup.bat` again and choose a smaller option.
