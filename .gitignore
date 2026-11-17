@@ -1,0 +1,59 @@
+# ---- personal data / secrets (NEVER commit) ----
+profiles/
+logs/
+backups/
+knowledge_index.json
+packs/
+tts_tmp/
+*.key
+xai_config.json
+other_api_config.json
+licenses.json
+setup_state.json
+aurora_config.json
+aurora_config.json.*
+.env
+*.env
+
+# ---- downloaded by Setup (third-party binaries & models) ----
+.venv/
+venv/
+models/
+voices/*.onnx
+voices/*.onnx.json
+# ...except Robert's own voice, which ships with the app
+!voices/en_US-robert-medium.onnx
+!voices/en_US-robert-medium.onnx.json
+piper.exe
+piper
+*.dll
+*.ort
+*.so
+*.dylib
+espeak-ng-data/
+pkgconfig/
+lib/
+OllamaSetup.exe
+*.part
+
+# ---- dev leftovers / generated audio ----
+__pycache__/
+*.py[cod]
+*.bak*
+*.prev
+*.tmp
+output.wav
+preview.wav
+dual_grok_tts.wav
+grok_tts_out.wav
+response.txt
+preview.txt
+aurora_gemma_trace.py
+run_gemma_trace.*
+.DS_Store
+Thumbs.db
+
+# Linux/Mac Piper extras
+espeak-ng
+piper_phonemize
+*.so.*

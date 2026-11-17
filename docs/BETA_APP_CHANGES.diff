@@ -1,0 +1,528 @@
+--- original/Aurora_Companion.py
++++ beta/Aurora_Companion.py
+@@ -69,13 +69,13 @@
+     for pip_name, mod_name, err in missing:
+         lines.append(f"  • {pip_name}  (import {mod_name})")
+     if IS_WINDOWS:
+-        install_hint = "Install_Dependencies.bat"
++        install_hint = "Setup.bat"
+         start_hint = "Start_Aurora.bat"
+-        pip_cmd = "py -m pip install -r requirements.txt"
++        pip_cmd = r".venv\Scripts\python -m pip install -r requirements.txt"
+     else:
+-        install_hint = "Install_Dependencies.command"
++        install_hint = "Setup.command"
+         start_hint = "Start_Aurora.command"
+-        pip_cmd = "python3 -m pip install -r requirements.txt"
++        pip_cmd = ".venv/bin/python -m pip install -r requirements.txt"
+     lines.extend([
+         "",
+         "Easiest fix:",
+@@ -116,7 +116,7 @@
+ import cv2
+ 
+ # ====================== CONFIG ======================
+-APP_VERSION = "0.9.5.1-beta"                 # desktop portable beta (Win + Mac)
++APP_VERSION = "0.9.6-beta"                 # desktop portable beta (Win + Mac)
+ OLLAMA_MODEL = "hf.co/HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced:Q4_K_M"  # default local model (GPU / Auto)
+ OLLAMA_NUM_CTX = 8192                     # Auto/GPU context cap for ~12 GB VRAM
+ OLLAMA_MODEL_CPU = "dolphin3:latest"         # Force-CPU fallback model
+@@ -263,8 +263,8 @@
+ # Back-compat name used throughout the app (piper binary, voices, avatars, …)
+ PIPER_DIR = APP_ROOT
+ VOICES_DIR = PIPER_DIR / "voices"         # all .onnx voice models live here
+-PIPER_MODEL = "en_US-libritts_r-medium.onnx"
+-PIPER_CONFIG = "en_US-libritts_r-medium.onnx.json"
++PIPER_MODEL = "en_US-robert-medium.onnx"          # bundled default voice (beta)
++PIPER_CONFIG = "en_US-robert-medium.onnx.json"
+ 
+ 
+ def get_piper_binary() -> Path:
+@@ -717,6 +717,61 @@
+ # --- END ollama config helpers (round 3) ---
+ 
+ 
++# --- BEGIN beta installer defaults ---
++# Setup.bat / aurora_setup.py writes a "setup" block into aurora_config.json with the
++# hardware tier it picked. New companions start with that speech-to-text size instead
++# of "medium" (which is too heavy for low-end laptops). Existing profiles keep theirs.
++def _setup_default_whisper_size() -> str:
++    try:
++        if AURORA_CONFIG_PATH.exists():
++            data = json.loads(AURORA_CONFIG_PATH.read_text(encoding="utf-8"))
++            size = str(((data or {}).get("setup") or {}).get("whisper_size") or "").strip().lower()
++            if size in ("tiny", "base", "small", "medium"):
++                return size
++    except Exception:
++        pass
++    return "medium"
++
++
++DEFAULT_WHISPER_SIZE = _setup_default_whisper_size()
++
++
++def _setup_knowledge_enabled() -> bool:
++    """Book library (RAG) on/off. Setup writes setup.knowledge_library. When missing,
++    it is enabled only on PCs with 6 GB+ RAM (the index uses ~1.2-1.5 GB of memory)."""
++    try:
++        if AURORA_CONFIG_PATH.exists():
++            data = json.loads(AURORA_CONFIG_PATH.read_text(encoding="utf-8"))
++            val = ((data or {}).get("setup") or {}).get("knowledge_library")
++            if isinstance(val, bool):
++                return val
++    except Exception:
++        pass
++    try:
++        if IS_WINDOWS:
++            import ctypes
++
++            class _MS(ctypes.Structure):
++                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
++                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
++                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
++                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
++                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
++            m = _MS()
++            m.dwLength = ctypes.sizeof(_MS)
++            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
++            return m.ullTotalPhys >= 6 * 1024 ** 3
++    except Exception:
++        pass
++    return True
++
++
++KNOWLEDGE_ENABLED = _setup_knowledge_enabled()
++# Books that are only searched when Adult mode is ON (never for under-18 profiles)
++ADULT_KNOWLEDGE_SOURCES = {"kama_sutra.txt"}
++# --- END beta installer defaults ---
++
++
+ 
+ def safe_load_json(path: Path, default=None, repair_name: str = "data"):
+     """
+@@ -856,7 +911,7 @@
+         except Exception as e:
+             print(f"[Knowledge] Could not save index: {e}")
+ 
+-    def query(self, question: str, top_k: int = RAG_TOP_K) -> str:
++    def query(self, question: str, top_k: int = RAG_TOP_K, exclude_sources=None) -> str:
+         """Return a single string of the most relevant passages, or empty string."""
+         if not self.ready or not question.strip():
+             return ""
+@@ -878,7 +933,10 @@
+                 df[t] += 1
+         N = len(self.chunks)
+ 
++        exclude = set(exclude_sources or ())
+         for c in self.chunks:
++            if exclude and c.get("source") in exclude:
++                continue
+             tf = Counter(c["tokens"])
+             dl = len(c["tokens"]) or 1
+             score = 0.0
+@@ -964,7 +1022,7 @@
+             "location": "",          # city for weather/news (online mode)
+             "online_mode": False,    # False = offline only (default for privacy)
+             "reply_length": "normal",  # short | normal | long
+-            "whisper_size": "medium",  # tiny | base | small | medium (CPU speed vs accuracy)
++            "whisper_size": DEFAULT_WHISPER_SIZE,  # tiny | base | small | medium (CPU speed vs accuracy)
+             "llm_provider": "ollama",  # ollama (local) | grok (xAI cloud API)
+             "tts_provider": "piper",   # piper (local) | grok (xAI TTS)
+             "think_harder": False,    # Grok-only: deeper replies for harder questions
+@@ -3546,21 +3604,19 @@
+                 "Adult mode is not available for under-18 profiles."
+             )
+             return
++        if (self.current_user or {}).get("age_group") == "under18":
++            messagebox.showinfo(
++                "Adult mode",
++                "Adult mode is not available for under-18 profiles."
++            )
++            return
+         currently_on = bool((self.user_profile or {}).get("nsfw_mode", False))
+         new_val = not currently_on
+         if new_val:
+             if not self.adult_content_unlocked():
+-                messagebox.showinfo(
+-                    "Adult unlock required",
+-                    "Adult mode needs the Adult Unlock pack (or Complete Pack).\n\n"
+-                    "Open Settings → Upgrades to install a pack, or use the\n"
+-                    "dev test unlock while developing."
+-                )
+-                try:
+-                    self.show_upgrades_window()
+-                except Exception:
+-                    pass
+-                return
++                # Beta: an 18+ confirmation unlocks Adult mode (no paid pack needed)
++                if not self.confirm_adult_age():
++                    return
+             ok = messagebox.askyesno(
+                 "Enable Adult mode?",
+                 "Adult / NSFW mode allows explicit and seductive conversation.\n\n"
+@@ -3623,8 +3679,100 @@
+                 log("WARN", f"Bad pack.json in {folder.name}: {e}")
+         return packs
+ 
++    def apply_under18_alignment(self, save: bool = True):
++        """Beta: anyone who says they are NOT 18+ gets under-18 behavior everywhere:
++        age_group=under18 on the profile and the logged-in account, Adult mode off and
++        hard-locked, adult confirmation cleared, PG + under-18 prompt rules."""
++        p = self.user_profile if isinstance(self.user_profile, dict) else None
++        if p is not None:
++            p["age_group"] = "under18"
++            p["nsfw_mode"] = False
++            p["adult_age_confirmed"] = False
++            p.pop("adult_age_confirmed_at", None)
++        if isinstance(self.current_user, dict):
++            self.current_user["age_group"] = "under18"
++            try:
++                idx = self.load_users_index()
++                for u in idx.get("users") or []:
++                    if u.get("id") == self.current_user.get("id"):
++                        u["age_group"] = "under18"
++                self.save_users_index(idx)
++            except Exception as e:
++                log("WARN", f"Could not update account age: {e}")
++        if getattr(self, "current_mood", "") in ("seductive", "horny", "intimate", "teasing"):
++            self.current_mood = "affectionate"
++        if save and p is not None and p.get("companion_name"):
++            try:
++                self.save_profile()
++            except Exception as e:
++                log("WARN", f"Could not save under-18 profile: {e}")
++        try:
++            if self.messages and self.messages[0].get("role") == "system":
++                self.messages[0]["content"] = self.build_final_prompt()
++        except Exception:
++            pass
++        log("INFO", "Profile set to under-18 settings")
++
++    def adult_age_confirmed(self) -> bool:
++        """Beta: True when this profile/user confirmed 18+ for Adult mode (never for under18)."""
++        if (self.current_user or {}).get("age_group") == "under18":
++            return False
++        p = self.user_profile or {}
++        if p.get("age_group") == "under18":
++            return False
++        return p.get("age_group") == "over18" and bool(p.get("adult_age_confirmed"))
++
++    def confirm_adult_age(self, parent=None) -> bool:
++        """Beta: ask the user to confirm they are 18+. Under-18 accounts stay hard-blocked."""
++        if (self.current_user or {}).get("age_group") == "under18" or \
++                (self.user_profile or {}).get("age_group") == "under18":
++            messagebox.showinfo("Adult mode", "Adult mode is not available for under-18 profiles.",
++                                parent=parent)
++            return False
++        ok = messagebox.askyesno(
++            "Confirm your age (18+)",
++            "Adult mode is locked.\n\n"
++            "Adult mode can include mature and sexual conversation. It is only for\n"
++            "adults who are 18 or older (or the age of majority where you live).\n\n"
++            "Do you confirm that you are 18 years of age or older?\n\n"
++            "If you choose No, this profile switches to under-18 settings\n"
++            "(Adult mode permanently locked, age-appropriate replies).",
++            icon="warning", parent=parent,
++        )
++        if not ok:
++            log("INFO", "Adult age confirmation declined -> under-18 settings")
++            self.apply_under18_alignment(save=True)
++            return False
++        p = self.user_profile if isinstance(self.user_profile, dict) else None
++        if p is not None:
++            p["age_group"] = "over18"
++            p["adult_age_confirmed"] = True
++            p["adult_age_confirmed_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
++            try:
++                self.save_profile()
++            except Exception as e:
++                log("WARN", f"Could not save adult age confirmation: {e}")
++        log("INFO", "Adult age confirmed (18+) for this companion profile")
++        return True
++
++    def _dual_adult_allowed(self) -> bool:
++        """Beta: Dual Mode 'Adult mode' box needs an 18+ account and an 18+ confirmation."""
++        var = getattr(self, "_dual_nsfw_var", None)
++        if var is None or not bool(var.get()):
++            return False
++        if (self.current_user or {}).get("age_group") == "under18":
++            var.set(False)
++            return False
++        if self.adult_content_unlocked() or self.confirm_adult_age(parent=getattr(self, "_dual_win", None)):
++            return True
++        var.set(False)
++        return False
++
+     def adult_content_unlocked(self) -> bool:
+-        """True if Adult Unlock / Complete Pack is installed, or dev unlock is on."""
++        """True if the user confirmed 18+ (beta), an Adult Unlock / Complete Pack is installed,
++        or dev unlock is on. Under-18 profiles are always blocked by nsfw_enabled()."""
++        if self.adult_age_confirmed():
++            return True
+         # Environment override for development
+         if str(os.environ.get("AURORA_DEV_UNLOCK_ALL", "")).strip() in ("1", "true", "yes"):
+             return True
+@@ -3808,7 +3956,8 @@
+         unlocked = self.adult_content_unlocked()
+         tk.Label(
+             status_frame,
+-            text=("Adult unlock: ACTIVE ✓" if unlocked else "Adult unlock: not installed"),
++            text=("Adult mode: unlocked (18+ confirmed) ✓" if unlocked
++                  else "Adult mode: locked — Settings → Adult mode, then confirm you are 18+"),
+             font=(self.font_family, 12, "bold"),
+             fg=("#7dcea0" if unlocked else "#e0c070"),
+             bg="#14141c",
+@@ -3919,7 +4068,9 @@
+         ).pack(side="left")
+ 
+         dev_row = tk.Frame(win, bg="#0d0d12")
+-        dev_row.pack(fill="x", padx=16, pady=(0, 8))
++        # Beta builds: developer unlock buttons only when AURORA_DEV=1 is set
++        if str(os.environ.get("AURORA_DEV", "")).strip().lower() in ("1", "true", "yes"):
++            dev_row.pack(fill="x", padx=16, pady=(0, 8))
+         tk.Label(
+             dev_row, text="Developer testing",
+             font=(self.font_family, 10, "bold"), fg="#666677", bg="#0d0d12"
+@@ -5587,6 +5738,18 @@
+                 return
+             age = age_var.get()
+             password = pw_var.get()
++            if age == "over18":
++                # Beta: always confirm 18+; "No" creates an under-18 account
++                if not messagebox.askyesno(
++                    "Age confirmation",
++                    "Confirm you are 18 or older and will use Adult features responsibly.\n\n"
++                    "Choose No if you are under 18 - the profile will use under-18 settings."
++                ):
++                    age = "under18"
++                    password = ""
++                    messagebox.showinfo("Under-18 settings",
++                                        "This profile will use under-18 settings.\n"
++                                        "Adult mode is not available.")
+             if age == "over18" and password.strip() == "":
+                 # Allow empty password, but confirm
+                 if not messagebox.askyesno(
+@@ -5595,13 +5758,6 @@
+                     "Anyone on this PC can open it."
+                 ):
+                     return
+-            if age == "over18" and password.strip():
+-                # Light adult confirmation once at account creation
+-                if not messagebox.askyesno(
+-                    "Age confirmation",
+-                    "Confirm you are 18 or older and will use Adult features responsibly."
+-                ):
+-                    return
+             user = self.create_user_account(name, age, password.strip())
+             self.play_ui_sound("select")
+             self.login_user(user)
+@@ -5656,6 +5812,8 @@
+                  font=(self.font_family, 11), fg="#666666", bg=bg).pack(pady=(30, 10))
+ 
+     def select_age(self, age_group):
++        if age_group == "under18":
++            self.apply_under18_alignment(save=False)
+         self.user_profile["age_group"] = age_group
+         if age_group == "over18":
+             self.show_legal_agreement()
+@@ -5691,16 +5849,26 @@
+         btn_frame.pack()
+         tk.Button(btn_frame, text="Go Back", font=(self.font_family, 12),
+                   bg="#22222a", fg="#ffffff", relief="flat", width=15, cursor="hand2",
+-                  command=self.show_title_screen).pack(side="left", padx=15)
++                  command=self._legal_go_back).pack(side="left", padx=15)
+         tk.Button(btn_frame, text="Continue", font=(self.font_family, 12, "bold"),
+                   bg="#22222a", fg="#ffffff", activebackground="#c45c8a", relief="flat", width=15, cursor="hand2",
+                   command=self.check_agreement).pack(side="left", padx=15)
+ 
++    def _legal_go_back(self):
++        # Beta: leaving the 18+ agreement without confirming = not confirmed adult
++        self.user_profile["age_group"] = "under18"
++        self.show_title_screen()
++
+     def check_agreement(self):
+         if self.agree_var.get():
+             self.show_companion_selection()
+         else:
+-            messagebox.showwarning("Agreement Required", "You must check the box to continue.")
++            if messagebox.askyesno("Agreement Required",
++                                   "You did not confirm you are 18 or older.\n\n"
++                                   "Continue with under-18 settings (Adult mode locked)?\n"
++                                   "Choose No to go back and tick the box."):
++                self.apply_under18_alignment(save=False)
++                self.show_companion_selection()
+ 
+     # ==================== COMPANION SELECTION ====================
+     def show_companion_selection(self):
+@@ -5878,7 +6046,7 @@
+             "location": "",
+             "online_mode": False,
+             "reply_length": "normal",
+-            "whisper_size": "medium",
++            "whisper_size": DEFAULT_WHISPER_SIZE,
+             "llm_provider": "ollama",
+             "tts_provider": "piper",
+             "think_harder": False,
+@@ -6747,10 +6915,11 @@
+         # Auto-detect voices from the voices/ folder (and piper root as fallback)
+         self.available_voices = self.scan_available_voices()
+         default_label = next(iter(self.available_voices.keys()))
+-        # Prefer libritts if present
+-        for label, vid in self.available_voices.items():
+-            if "libritts" in vid.lower():
+-                default_label = label
++        # Prefer the bundled Robert voice, then libritts if present
++        for pref in ("robert", "libritts"):
++            hit = next((label for label, vid in self.available_voices.items() if pref in vid.lower()), None)
++            if hit:
++                default_label = hit
+                 break
+         self.voice_var = tk.StringVar(value=default_label)
+         ttk.Combobox(container, textvariable=self.voice_var,
+@@ -6768,7 +6937,7 @@
+         """Return (model_path, config_path) for a voice id like en_US-amy-medium.
+         Looks in voices/ first, then the piper root as fallback."""
+         if not voice_id:
+-            voice_id = self.user_profile.get("voice") or "en_US-libritts_r-medium"
++            voice_id = self.user_profile.get("voice") or PIPER_MODEL[:-5]
+ 
+         candidates = [
+             (VOICES_DIR / f"{voice_id}.onnx", VOICES_DIR / f"{voice_id}.onnx.json"),
+@@ -6802,7 +6971,7 @@
+                 if voice_id not in found:
+                     found[label] = voice_id
+         if not found:
+-            found["LibriTTS Medium (default)"] = "en_US-libritts_r-medium"
++            found["Robert Medium (default)"] = PIPER_MODEL[:-5]
+         return found
+ 
+     def preview_voice(self):
+@@ -8577,7 +8746,8 @@
+         )
+ 
+         # Adult/NSFW mode is opt-in. under18 is always PG. Memory is unchanged either way.
+-        if p.get("age_group") == "under18" or not self.nsfw_enabled():
++        minor = p.get("age_group") == "under18" or (self.current_user or {}).get("age_group") == "under18"
++        if minor or not self.nsfw_enabled():
+             if companion_kind == "pet":
+                 look = f"{pet_breed} {pet_type}".strip() or "pet"
+                 notes = app.get("notes") or ""
+@@ -8600,9 +8770,9 @@
+                     f"Keep conversations appropriate for everyday settings (home, work, public). "
+                     f"No sexual content, no explicit body focus, no seduction, and do not try to get "
+                     f"{user} into bed or escalate intimacy. "
+-                    f"If {user} steers toward adult topics, stay light and redirect without lecturing; "
+-                    f"they can enable Adult mode in Settings when they want that. "
+-                    f"You are {gender} with a {app.get('body_type')} body, {app.get('hair')} hair, "
++                    f"If {user} steers toward adult topics, stay light and redirect without lecturing"
++                    + ("; they can enable Adult mode in Settings when they want that. " if not minor else ". ")
++                    + f"You are {gender} with a {app.get('body_type')} body, {app.get('hair')} hair, "
+                     f"{app.get('eyes')} eyes, {app.get('height')}, {app.get('weight')}. "
+                     f"Their interests include: {hobbies}. "
+                     f"Be helpful, fun, and genuinely present."
+@@ -8637,6 +8807,16 @@
+             single = (p.get("relationship_style") or "").strip().lower()
+             styles = [single] if single else []
+         styles = [str(s).strip().lower() for s in styles if s]
++        if minor:
++            # Under-18: no romantic / intimate relationship styles, explicit youth-safety rules
++            styles = [s for s in styles if s not in ("romantic", "lover", "intimate", "partner")]
++            base += (
++                f" IMPORTANT: {user} is under 18. Keep every reply age-appropriate for a minor: "
++                f"no romance, flirting, dating role-play, sexual or suggestive content, no graphic violence, "
++                f"and do not encourage alcohol, drugs, gambling or risky behavior. Act like a kind, "
++                f"trustworthy friend or tutor. For serious problems (safety, self-harm, abuse), gently "
++                f"encourage {user} to talk to a parent, teacher or other trusted adult. Never mention Adult mode."
++            )
+         style_blurb_map = {
+             "friend": (
+                 f"Relationship: close friend. Be warm, loyal, and easy to talk to. "
+@@ -8816,9 +8996,9 @@
+         saved profile preference — switching back to Auto restores the profile size.
+         """
+         global _WHISPER_CACHE
+-        size = (self.user_profile.get("whisper_size") or "medium").lower()
++        size = (self.user_profile.get("whisper_size") or DEFAULT_WHISPER_SIZE).lower()
+         if size not in ("tiny", "base", "small", "medium"):
+-            size = "medium"
++            size = DEFAULT_WHISPER_SIZE
+         # Low-power override while Force CPU is on (profile left untouched)
+         if self.force_ollama_cpu():
+             size = WHISPER_SIZE_CPU
+@@ -9841,7 +10021,10 @@
+         self.messages = self.load_memory()
+         # Build / load the book knowledge index (runs in background-friendly way)
+         try:
+-            self.knowledge.build_or_load()
++            if KNOWLEDGE_ENABLED:
++                self.knowledge.build_or_load()
++            else:
++                log("INFO", "Book library is turned off (setup / low-memory PC) - skipping index")
+         except Exception as e:
+             print(f"[Knowledge] Index build error: {e}")
+         # Live info (only fetches network data if online_mode is on)
+@@ -11243,7 +11426,10 @@
+     def retrieve_knowledge(self, question: str) -> str:
+         """Pull relevant passages from the book library for this question."""
+         try:
+-            passages = self.knowledge.query(question, top_k=RAG_TOP_K)
++            if not KNOWLEDGE_ENABLED:
++                return ""
++            exclude = set() if self.nsfw_enabled() else ADULT_KNOWLEDGE_SOURCES
++            passages = self.knowledge.query(question, top_k=RAG_TOP_K, exclude_sources=exclude)
+             if passages:
+                 print(f"[Knowledge] Retrieved {passages.count(chr(10)+chr(10))+1} passages for: {question[:60]}...")
+             return passages
+@@ -12204,7 +12390,7 @@
+             self.setup_system_tray()
+         state = "ON" if self.tray_enabled and self._tray_available else "OFF"
+         if self.tray_enabled and not self._tray_available:
+-            install = "Install_Dependencies.bat" if IS_WINDOWS else "Install_Dependencies.command"
++            install = "Setup.bat" if IS_WINDOWS else "Setup.command"
+             pip = "py -m pip" if IS_WINDOWS else "python3 -m pip"
+             messagebox.showinfo(
+                 "Minimize to tray",
+@@ -12635,13 +12821,14 @@
+             self._settings_row(comp_body, "Clear / restart chat", self.clear_history)
+             if self.is_grok_active():
+                 self._settings_row(comp_body, "Summarize chat into memory (Grok)…", self.manual_chat_summary)
+-            if (self.user_profile or {}).get("age_group") != "under18":
++            if (self.user_profile or {}).get("age_group") != "under18" and \
++                    (self.current_user or {}).get("age_group") != "under18":
+                 nsfw_on = self.nsfw_enabled()
+                 unlocked = self.adult_content_unlocked()
+                 if nsfw_on:
+                     nsfw_label = "Adult mode: ON  ✓  (NSFW allowed)"
+                 elif not unlocked:
+-                    nsfw_label = "Adult mode: locked  (needs upgrade)"
++                    nsfw_label = "Adult mode: locked  (18+ only — tap to unlock)"
+                 else:
+                     nsfw_label = "Adult mode: OFF  (PG — safe in public)"
+                 self._settings_row(comp_body, nsfw_label, self.toggle_nsfw_mode)
+@@ -14714,7 +14901,7 @@
+         text_w.pack(fill="both", expand=True)
+         lines = list(results.get("details") or [])
+         lines.append("")
+-        install_name = "Install_Dependencies.bat" if IS_WINDOWS else "Install_Dependencies.command"
++        install_name = "Setup.bat" if IS_WINDOWS else "Setup.command"
+         piper_name = "piper.exe" if IS_WINDOWS else "piper"
+         lines.append("Quick fixes:")
+         lines.append(f"  1. Python packages: run {install_name} once")
+@@ -18010,7 +18197,7 @@
+             messagebox.showwarning("Dual Mode", "Pick two different companions.", parent=self._dual_win)
+             return
+         self._dual_max_turns = self._dual_parse_max_turns()
+-        self._dual_nsfw = bool(self._dual_nsfw_var.get())
++        self._dual_nsfw = self._dual_adult_allowed()
+         continuing = self._dual_has_active_chat()
+         if continuing:
+             # Keep LLM histories + chat log; pick up from the last speaker
+@@ -18676,7 +18863,7 @@
+             else:
+                 self._dual_first = random.choice(["a", "b"])
+             self._dual_max_turns = self._dual_parse_max_turns()
+-            self._dual_nsfw = bool(self._dual_nsfw_var.get())
++            self._dual_nsfw = self._dual_adult_allowed()
+             self._dual_stop_flag = False
+             self._dual_running = True
+             self._dual_turn_count = 0
