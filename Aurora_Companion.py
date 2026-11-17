@@ -6146,7 +6146,7 @@ class AuroraApp:
             container, text="✦  Dual Mode — watch two companions talk",
             font=(self.font_family, 13, "bold"), bg="#2a1f3d", fg="#e8d0ff",
             activebackground="#3d2a5c", activeforeground="#ffffff",
-            relief="flat", width=34, height=2, cursor="hand2",
+            relief="flat", height=2, padx=18, cursor="hand2",
             command=self.open_dual_mode,
         )
         try:
