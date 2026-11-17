@@ -222,6 +222,15 @@ def ollama_api(path: str, payload=None, timeout=10):
     return urlopen(req, timeout=timeout)
 
 
+def _ollama_tray_running() -> bool:
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq ollama app.exe", "/NH"], capture_output=True,
+                             text=True, creationflags=NO_WINDOW, timeout=20).stdout
+        return "ollama app.exe" in out.lower()
+    except Exception:
+        return False
+
+
 def ollama_up() -> bool:
     try:
         with ollama_api("/api/version", timeout=3) as r:
@@ -454,6 +463,15 @@ class Installer:
         if ollama_up():
             return
         exe = getattr(self, "ollama_exe", None) or hwcheck.ollama_exe()
+        if IS_WINDOWS and _ollama_tray_running():
+            # The Ollama tray app ("ollama app.exe") starts its own server; on slow PCs that can take
+            # a minute or two. Starting a second "ollama serve" would fight it for the port.
+            self.status("Waiting for Ollama to start (can take a couple of minutes on slower PCs)...")
+            for _ in range(180):
+                if ollama_up():
+                    self.log("Ollama is running (started by the Ollama app).")
+                    return
+                time.sleep(1)
         self.log("Starting the Ollama service...")
         flags = (0x00000008 | NO_WINDOW) if IS_WINDOWS else 0  # DETACHED_PROCESS
         subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
